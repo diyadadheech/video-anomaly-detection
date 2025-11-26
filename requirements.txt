@@ -1,10 +1,10 @@
 flask
 gunicorn
-torch==1.10.0
-torchvision==0.11.3
-yolov5
-opencv-python
-numpy==1.23.1
-pillow==9.5.0
-deepface
+numpy
+pillow
 ipython
+
+torch==2.0.1
+torchvision==0.15.2
+ultralytics
+opencv-python-headless
