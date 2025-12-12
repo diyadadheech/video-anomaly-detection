@@ -50,16 +50,20 @@ def get_model(weights, device='', dnn=False, data=None, fp16=False):
             _model_instance = None
     return _model_instance
 
-# Lazy loader for telepot bot
+# Lazy loader for telepot bot (reads token from env)
 _bot_instance = None
-def get_bot(token='8304515213:AAGPRC957iOtQxi0ANRW_UIBnf05JefrbiM'):
+def get_bot():
     """
-    Lazy-create telepot.Bot so the import of telepot (and underlying requests) happens only when needed.
+    Lazy-create telepot.Bot using TELEGRAM_BOT_TOKEN from environment.
+    Returns None on failure.
     """
     global _bot_instance
     if _bot_instance is None:
         try:
             import telepot
+            token = os.environ.get("TELEGRAM_BOT_TOKEN")
+            if not token:
+                raise RuntimeError("TELEGRAM_BOT_TOKEN not found in environment")
             _bot_instance = telepot.Bot(token)
         except Exception as e:
             import logging
@@ -99,10 +103,27 @@ def run(
         vid_stride=1,  # video frame-rate stride
 ):
     source = str(source)
-    if source.strip().endswith(".mp4"):
-        vid_file=True
+
+    # --- SAFETY: check source existence and set flags without crashing ---
+    from pathlib import Path as _Path
+    src_path = _Path(source)
+
+    # If source is numeric or a stream spec (webcam/URL) we won't check filesystem
+    is_probably_stream = source.isnumeric() or source.lower().startswith(('rtsp://', 'rtmp://', 'http://', 'https://')) or source.lower().startswith('screen')
+
+    if not is_probably_stream:
+        # If source is a local file, ensure it exists. If missing, log and return gracefully.
+        if src_path.exists():
+            vid_file = source.strip().endswith(".mp4")
+        else:
+            import logging
+            logging.error("Source file not found: %s. Aborting run() early to avoid crash.", source)
+            # Return early so the server stays up and logs the missing file.
+            return
     else:
-        vid_file=False
+        # It's a stream/webcam/screenshot URL-like input
+        vid_file = source.strip().endswith(".mp4")
+
     save_img = not nosave and not source.endswith('.txt')  # save inference images
     is_file = Path(source).suffix[1:] in (IMG_FORMATS + VID_FORMATS)
     is_url = source.lower().startswith(('rtsp://', 'rtmp://', 'http://', 'https://'))
@@ -223,7 +244,10 @@ def run(
                         for *_, _, cls in det:
                             c_idx = int(cls)
                             if names[c_idx] == "Vandalism":
-                                bot.sendMessage('5788884211', str("Vandalism detected"))
+                                try:
+                                    bot.sendMessage('5788884211', str("Vandalism detected"))
+                                except Exception:
+                                    pass
                                 try:
                                     bot.sendPhoto('5788884211', photo=open("vandalisum.jpg", "rb"))
                                 except Exception:
