@@ -10,3 +10,5 @@ ultralytics
 opencv-python-headless
 tqdm
 numpy<2
+telepot
+seaborn
