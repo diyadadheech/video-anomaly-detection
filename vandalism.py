@@ -13,20 +13,61 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))  # add ROOT to PATH
 ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
-import pathlib
-temp = pathlib.PosixPath
-pathlib.PosixPath = pathlib.WindowsPath
+# NOTE: removed the problematic line that forced WindowsPath on non-Windows:
+# import pathlib
+# temp = pathlib.PosixPath
+# pathlib.PosixPath = pathlib.WindowsPath
+# That line caused NotImplementedError on Linux. DO NOT RESTORE IT.
 
-from models.common import DetectMultiBackend
+# --------------------------
+# Keep other imports that are safe at import time
 from utils.dataloaders import IMG_FORMATS, VID_FORMATS, LoadImages, LoadScreenshots, LoadStreams
 from utils.general import (LOGGER, Profile, check_file, check_img_size, check_imshow, check_requirements, colorstr, cv2,
                            increment_path, non_max_suppression, print_args, scale_boxes, strip_optimizer, xyxy2xywh)
 from utils.plots import Annotator, colors, save_one_box
 from utils.torch_utils import select_device, smart_inference_mode
-import telepot
-bot=telepot.Bot('8304515213:AAGPRC957iOtQxi0ANRW_UIBnf05JefrbiM')
 
+# TELEPOT & MODEL: do NOT import at top-level (they may import requests/certifi or cause heavy model load).
+# We will lazy-load them below only when needed.
 
+# --------------------------
+# Lazy loader for DetectMultiBackend
+_model_instance = None
+def get_model(weights, device='', dnn=False, data=None, fp16=False):
+    """
+    Lazy-load DetectMultiBackend. Returns the model instance or None on failure.
+    Call this inside the route/function that runs inference.
+    """
+    global _model_instance
+    if _model_instance is None:
+        try:
+            # import here so it does not execute at module import time
+            from models.common import DetectMultiBackend
+            _model_instance = DetectMultiBackend(weights, device=device, dnn=dnn, data=data, fp16=fp16)
+        except Exception as e:
+            import logging
+            logging.exception("Model load failed in get_model(): %s", e)
+            _model_instance = None
+    return _model_instance
+
+# Lazy loader for telepot bot
+_bot_instance = None
+def get_bot(token='8304515213:AAGPRC957iOtQxi0ANRW_UIBnf05JefrbiM'):
+    """
+    Lazy-create telepot.Bot so the import of telepot (and underlying requests) happens only when needed.
+    """
+    global _bot_instance
+    if _bot_instance is None:
+        try:
+            import telepot
+            _bot_instance = telepot.Bot(token)
+        except Exception as e:
+            import logging
+            logging.exception("Failed to create telepot bot: %s", e)
+            _bot_instance = None
+    return _bot_instance
+
+# --------------------------
 @smart_inference_mode()
 def run(
         weights=ROOT / 'yolov5s.pt',  # model path or triton URL
@@ -74,14 +115,19 @@ def run(
     save_dir = increment_path(Path(project) / name, exist_ok=exist_ok)  # increment run
     (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
 
-    # Load model
+    # Load model (LAZY)
     device = select_device(device)
-    model = DetectMultiBackend(weights, device=device, dnn=dnn, data=data, fp16=half)
+    model = get_model(weights=weights, device=device, dnn=dnn, data=data, fp16=half)
+    if model is None:
+        # If model couldn't be created, log and exit gracefully:
+        import logging
+        logging.error("Model could not be loaded. Exiting run().")
+        return
     stride, names, pt = model.stride, model.names, model.pt
     imgsz = check_img_size(imgsz, s=stride)  # check image size
 
     print(names)
-    
+
     # Dataloader
     bs = 1  # batch_size
     if webcam:
@@ -113,9 +159,6 @@ def run(
         # NMS
         with dt[2]:
             pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
-
-        # Second-stage classifier (optional)
-        # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
 
         # Process predictions
         for i, det in enumerate(pred):  # per image
@@ -152,22 +195,48 @@ def run(
 
                     if save_img or save_crop or view_img:  # Add bbox to image
                         c = int(cls)  # integer class
-                        
                         label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
                         annotator.box_label(xyxy, label, color=colors(c, True))
-                       
-                        
 
                     if save_crop:
                         save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
-                    
-            cv2.imshow("demo", im0)
-            cv2.imwrite("vandalisum.jpg",im0)
+
+            # display / save frame
+            try:
+                cv2.imshow("demo", im0)
+            except Exception:
+                # On headless servers cv2.imshow may fail; ignore
+                pass
+
+            try:
+                cv2.imwrite("vandalisum.jpg", im0)
+            except Exception:
+                pass
+
             if len(det):
-                if names[c]=="Vandalism":
-                            bot.sendMessage('5788884211',str("Vandalism detected"))
-                            bot.sendPhoto('5788884211',photo=open("vandalisum.jpg","rb"))
-                            bot.sendLocation('5788884211',latitude=13.032674274514838, longitude=77.59203816475915)
+                # Send Telegram alert using lazy-created bot
+                bot = get_bot()
+                if bot is not None:
+                    # Find index c for "Vandalism" class, but only if names list exists
+                    try:
+                        # iterate to find any detection with class name "Vandalism"
+                        for *_, _, cls in det:
+                            c_idx = int(cls)
+                            if names[c_idx] == "Vandalism":
+                                bot.sendMessage('5788884211', str("Vandalism detected"))
+                                try:
+                                    bot.sendPhoto('5788884211', photo=open("vandalisum.jpg", "rb"))
+                                except Exception:
+                                    pass
+                                try:
+                                    bot.sendLocation('5788884211', latitude=13.032674274514838, longitude=77.59203816475915)
+                                except Exception:
+                                    pass
+                                break
+                    except Exception:
+                        import logging
+                        logging.exception("Error while sending Telegram alert")
+
             if webcam:
                 if cv2.waitKey(1) & 0xFF == ord('q'):  # 1 millisecond
                     exit()
@@ -175,13 +244,15 @@ def run(
                 if cv2.waitKey(1) & 0xFF == ord ('q'):
                     exit()
             else:
-                if cv2.waitKey(0) & 0xFF == ord('q'):  # 1 millisecond
+                if cv2.waitKey(0) & 0xFF == ord('q'):  # blocking for images
                     exit()
 
+            # Save video writer if needed
             fps, w, h = 30, im0.shape[1], im0.shape[0]
             save_path = str(Path(save_path).with_suffix('.mp4'))  # force *.mp4 suffix on results videos
             vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
             vid_writer[i].write(im0)
+
 
 def parse_opt(File):
     parser = argparse.ArgumentParser()
@@ -223,8 +294,11 @@ def main(opt):
     run(**vars(opt))
 
 
-f = open('temp.txt', 'r')
-File = f.read()
-f.close()
-opt = parse_opt(File)
-main(opt)
+# --------------------------
+# Ensure nothing executes during import (important when Gunicorn imports this module)
+if __name__ == "__main__":
+    f = open('temp.txt', 'r')
+    File = f.read()
+    f.close()
+    opt = parse_opt(File)
+    main(opt)
